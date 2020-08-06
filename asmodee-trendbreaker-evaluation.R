@@ -16,12 +16,12 @@ library(grid)
 
 ### Global parameters ----
 
-compute_simulations <- T
-compute_detections <- T
-compute_scores <- T
+compute_simulations <- F
+compute_detections <- F
+compute_scores <- F
 plot_results <- T
-illustration_leicester <- T
-download_nhs_pathways <- T
+illustration_leicester <- F
+download_nhs_pathways <- F
 
 ### Scenarios and simulations ----
 #
@@ -72,7 +72,7 @@ overall_params <- list(
   select_interesting_scenarios = T, # Apply detection only to scenarios selected with
   # `interesting_scenarios`(or if FALSE to all scenarios)
   interesting_scenarios = list(
-    no_change=list(
+    steady_state=list(
       sim_method=c('project'), initial_level='medium', n_periods=1L, trends=c('constant')
     ),
     lockdown=list(
@@ -342,7 +342,7 @@ if (compute_simulations) {
   for (ids in sort(unique(scenarios$id_scenario))) {
 
     ## DEBUG
-    # ids <- scenarios %>% filter(interesting=='no_change') %>% pull(id_scenario) %>% unique()
+    # ids <- scenarios %>% filter(interesting=='steady_state') %>% pull(id_scenario) %>% unique()
     # ids <- scenarios %>% filter(interesting=='lockdown') %>% pull(id_scenario) %>% unique()
     # ids <- scenarios %>% filter(interesting=='relapse') %>% pull(id_scenario) %>% unique()
     # ids <- scenarios %>% filter(interesting=='flareup') %>% pull(id_scenario) %>% unique()
