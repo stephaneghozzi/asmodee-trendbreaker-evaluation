@@ -1298,7 +1298,9 @@ if (illustration_ccgs) {
   # "nhs_salford" and "nhs_trafford")
 
   # t7 <- Sys.time()
-  selected_ccgs <- c('nhs_leicester_city', 'nhs_blackburn_with_darwen') # , 'nhs_manchester',  'nhs_east_leicestershire_and_rutland', 'nhs_west_leicestershire', 'nhs_bury', 'nhs_salford', 'nhs_trafford')
+  selected_ccgs <- c('nhs_leicester_city', 'nhs_blackburn_with_darwen')
+    # 'nhs_east_leicestershire_and_rutland', 'nhs_west_leicestershire', 'nhs_manchester',
+    # 'nhs_bury', 'nhs_salford', 'nhs_trafford'
   date_range_selected <- seq(as.Date('2020-06-01'), as.Date('2020-07-31'), by='day')
   alpha_nhs <- optimal_alphas_all %>%
     filter(
