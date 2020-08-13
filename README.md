@@ -6,4 +6,4 @@ It takes about 2 and a half hours to run on a laptop for model selection through
 
 ## Licence
 
-Code and pictures are made available under a [CC0](https://creativecommons.org/share-your-work/public-domain/cc0/) licence, i.e. others may freely build upon, enhance and reuse the works for any purposes without restriction under copyright or database law.
+Code, data and images are made available under a [CC0](https://creativecommons.org/share-your-work/public-domain/cc0/) licence, i.e. others may freely build upon, enhance and reuse the works for any purposes without restriction under copyright or database law.
