@@ -22,7 +22,7 @@ compute_simulations <- F
 compute_detections <- F
 compute_scores <- F
 plot_results <- F
-illustration_ccgs <- T
+illustration_ccgs <- F
 download_nhs_pathways <- F
 
 ### Scenarios and simulations ----
@@ -1278,6 +1278,7 @@ CleanCCGName <- function (name_vec) {
 }
 
 if (illustration_ccgs) {
+
   # Reproducing and following https://github.com/thibautjombart/nhs_pathways_monitoring/blob/master/content/post/2020-05-31-analyses-ccg.Rmd
   # Published here: https://covid19-nhs-pathways-asmodee.netlify.app/
 
@@ -1302,16 +1303,8 @@ if (illustration_ccgs) {
     # 'nhs_east_leicestershire_and_rutland', 'nhs_west_leicestershire', 'nhs_manchester',
     # 'nhs_bury', 'nhs_salford', 'nhs_trafford'
   date_range_selected <- seq(as.Date('2020-06-01'), as.Date('2020-07-31'), by='day')
-  alpha_nhs <- optimal_alphas_all %>%
-    filter(
-      id_scenario == scenarios %>% filter(interesting=='relapse') %>%
-        pull(id_scenario) %>% unique() &
-        sim_method == 'project' &
-        detect_method == 'ASMODEE_optimal' &
-        score_type == overall_params$alpha_opt_type &
-        extent == 'Class: increase'
-    ) %>%
-    pull(alpha)
+  alpha_nhs <- 0.05
+
   # define candidate models
   models <- list(
     regression = lm_model(count ~ day),
