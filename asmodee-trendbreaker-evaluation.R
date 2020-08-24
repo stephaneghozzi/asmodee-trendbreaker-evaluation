@@ -15,6 +15,7 @@ library(gridExtra)
 library(grid)
 library(tools)
 library(ggtext)
+library(surveillance)
 
 ### Global parameters ----
 
@@ -22,7 +23,8 @@ compute_simulations <- F
 compute_detections <- F
 compute_scores <- F
 plot_results <- F
-illustration_ccgs <- F
+compute_ccgs <- F
+plot_ccgs <- T
 download_nhs_pathways <- F
 
 ### Scenarios and simulations ----
@@ -54,7 +56,7 @@ dir.create(here(ccgs_relative_path), showWarnings=F, recursive=T)
 overall_params <- list(
   sim_methods = c('project'), # c('project', 'pointsource')
   n_sim_steps = 42L, # number of simulation steps
-  n_replicates = 20L, # number of simulation per scenario and simulation method
+  n_replicates = 30L, # number of simulation per scenario and simulation method
   n_max_change = 1L, # maximum number of change points
   report_prob = 0.1, # probability of an infection being reported and thus observed
   d_min_period = 7L, # min duration of a period
@@ -78,20 +80,26 @@ overall_params <- list(
       sim_method=c('project'), initial_level='medium', n_periods=1L, trends=c('constant')
     ),
     lockdown=list(
-      sim_method=c('project'), initial_level='medium', n_periods=2L, trends=c('mild_upward','downward')
+      sim_method=c('project'), initial_level='medium', n_periods=2L,
+      trends=c('mild_upward','downward')
     ),
     relapse=list(
-      sim_method=c('project'), initial_level='high', n_periods=2L, trends=c('downward','mild_upward')
+      sim_method=c('project'), initial_level='high', n_periods=2L,
+      trends=c('downward','mild_upward')
     ),
     flareup=list(
-      sim_method=c('project'), initial_level='low', n_periods=2L, trends=c('constant','strong_upward')
+      sim_method=c('project'), initial_level='low', n_periods=2L,
+      trends=c('constant','strong_upward')
     )
   ), # Define scenarios which are interesting. `trends` should have length `n_periods`.
   # `interesting_scenarios` can be set to NULL if no scenario is especially interesting.
   # Even if `select_interesting_scenarios` is FALSE, `interesting_scenarios` is taken into
   # account to annotate the scenarios generated.
-  detect_algos = c('ASMODEE_manual', 'ASMODEE_optimal'), # , 'NegBin'),
-  detect_alpha = seq(0, 1, by=0.05),
+  detect_algos = c('ASMODEE_manual', 'ASMODEE_optimal', 'modified_Farrington'), # , 'NegBin'),
+  detect_alpha = sort(c(seq(0, 0.04, by=0.01), seq(0.05, 1, by=0.05))), # alpha values on which to
+  # compute scores
+  alpha_plot_pod = c(0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5), # values of alpha for the
+  # probability-of-detection plot, have to be in `detect_alpha`
   score_types = c('sensitivity', 'specificity', 'precision', 'f1', 'ba', 'timeliness', 'pod'),
   # "ba" = balanced accuracy, "pod" = probability of detection
   alpha_opt_type = 'pod' # Which score shall be used to set the optimal alpha? Can be either one of
@@ -135,6 +143,18 @@ asmodee_params <- list(
     regression = lm_model(count ~ date),
     negbin_time = glm_nb_model(count ~ date)
   )
+)
+
+# modified Farrington parameters
+ff_control <- list(
+  b=floor((overall_params$n_sim_steps-overall_params$d_observation_period-3)/7),
+  w=3,
+  limit54=c(0,1),
+  noPeriods=7,
+  pastWeeksNotIncluded=7,
+  glmWarnings=F,
+  thresholdMethod='nbPlugin',
+  pThresholdTrend=1
 )
 
 # Consistency checks
@@ -496,11 +516,17 @@ ClassifyCountCI <- function(cnt, ci) {
   # Classify observed counts `cnt` as "decrease", "normal", "increase" if they are below, within or
   # above the confidence interval `ci`.
 
+  ## DEBUG
+  # cnt <- count_timeseries$count
+  # ci <- ff_ci
+
   classification <- c()
   for (i in 1:length(cnt)) {
-    if (cnt[i] < ci[1]) {
+    if (is.na(ci[['lowerbound']][i]) | is.na(ci[['upperbound']][i])) {
+      clas <- NA
+    } else if (cnt[i] < ci[['lowerbound']][i]) {
       clas <- 'decrease'
-    } else if (cnt[i] > ci[2]) {
+    } else if (cnt[i] > ci[['upperbound']][i]) {
       clas <- 'increase'
     } else {
       clas <- 'normal'
@@ -539,9 +565,12 @@ if (compute_detections) {
     ## DEBUG
     # idc <- detection_comb %>% filter(interesting=='relapse' & sim_method=='project' & sim_run==1 & detect_method=='ASMODEE_optimal' & alpha==0.05) %>% pull(id_detect_comb)
     # idc <- detection_comb %>% filter(interesting=='relapse' & sim_method=='project' & sim_run==1 & detect_method=='NegBin' & alpha==0.05) %>% pull(id_detect_comb)
+    # idc <- detection_comb %>% filter(interesting=='lockdown' & sim_method=='project' & sim_run==1 & detect_method=='modified_Farrington' & alpha==0.05) %>% pull(id_detect_comb)
 
-    # cat('detect: ', idc, ' / ', round(100*idc/nrow(detection_comb)), '%\n', sep='')
-    # print(Sys.time()-t3)
+    # if (round(100000*idc/nrow(detection_comb))/1000 == round(100*idc/nrow(detection_comb))) {
+    #   cat('detect: ', idc, ' / ', round(100*idc/nrow(detection_comb)), '% // ', sep='')
+    #   print(Sys.time()-t3)
+    # }
 
     ids <- detection_comb %>% filter(id_detect_comb==idc) %>% pull(id_scenario)
     sm <- detection_comb %>% filter(id_detect_comb==idc) %>% pull(sim_method)
@@ -605,9 +634,9 @@ if (compute_detections) {
       } else {
         nb_size <- negbin_model$theta
         nb_mu <- exp(negbin_model$coefficients[['(Intercept)']])
-        negbin_ci <- c(
-          qnbinom(al/2, size=nb_size, mu=nb_mu),
-          qnbinom(1-al/2, size=nb_size, mu=nb_mu)
+        negbin_ci <- list(
+          lowerbound = rep(qnbinom(al/2, size=nb_size, mu=nb_mu), overall_params$n_sim_steps),
+          upperbound = rep(qnbinom(1-al/2, size=nb_size, mu=nb_mu), overall_params$n_sim_steps)
         )
       }
       detection_res <- count_timeseries %>%
@@ -617,8 +646,35 @@ if (compute_detections) {
       if (sr==1 & sm=='project') {
         negbin_res <- count_timeseries %>%
           full_join(detection_res, by='sim_step') %>%
-          mutate(ci_lb=negbin_ci[1], ci_ub=negbin_ci[2])
+          mutate(ci_lb=negbin_ci[['lowerbound']], ci_ub=negbin_ci[['upperbound']])
         detect_examples[[ids]][[dm]][[as.character(al)]] <- negbin_res
+      }
+
+    } else if (dm=='modified_Farrington') {
+
+      sts <- sts(count_timeseries$count, frequency=7)
+      ff_out <- farringtonFlexible(sts, control = append(list(alpha=al), ff_control))
+      ff_size <- ff_out@control$mu0Vector/(ff_out@control$phiVector-1)
+      ff_mu <- ff_out@control$mu0Vector
+      ff_ci <- list(
+        lowerbound = c(
+          rep(NA, overall_params$n_sim_steps-length(ff_out@epoch)),
+          qnbinom(al/2, size=ff_size, mu=ff_mu)
+        ),
+        upperbound = c(
+          rep(NA, overall_params$n_sim_steps-length(ff_out@epoch)),
+          qnbinom(1-al/2, size=ff_size, mu=ff_mu)
+        )
+      )
+      detection_res <- count_timeseries %>%
+        mutate(classification = ClassifyCountCI(count, ff_ci)) %>%
+        select(sim_step, classification)
+
+      if (sr==1 & sm=='project') {
+        ff_res <- count_timeseries %>%
+          full_join(detection_res, by='sim_step') %>%
+          mutate(ci_lb=ff_ci[['lowerbound']], ci_ub=ff_ci[['upperbound']])
+        detect_examples[[ids]][[dm]][[as.character(al)]] <- ff_res
       }
 
     } else {
@@ -692,11 +748,12 @@ if (compute_scores) {
 
     ## DEBUG
     # idc <- detection_comb %>% filter(interesting=='relapse' & sim_method=='project' & sim_run==1 & detect_method=='ASMODEE_optimal' & alpha==1) %>% pull(id_detect_comb)
+    # idc <- detection_comb %>% filter(interesting=='steady_state' & sim_method=='project' & sim_run==1 & detect_method=='ASMODEE_optimal' & alpha==0.4) %>% pull(id_detect_comb)
     # idc <- detection_comb %>% filter(interesting=='lockdown' & sim_method=='project' & sim_run==60 & detect_method=='ASMODEE_optimal' & alpha==0.05) %>% pull(id_detect_comb)
 
 
-    cat('sim: ', idc, ' / ', round(100*idc/nrow(detection_comb)), '%\n', sep='')
-    print(Sys.time()-t5)
+    # cat('sim: ', idc, ' / ', round(100*idc/nrow(detection_comb)), '%\n', sep='')
+    # print(Sys.time()-t5)
 
     ids <- detection_comb %>% filter(id_detect_comb==idc) %>% pull(id_scenario)
     sm <- detection_comb %>% filter(id_detect_comb==idc) %>% pull(sim_method)
@@ -744,7 +801,7 @@ if (compute_scores) {
     for (sc in 1:nrow(scores_considered)) {
 
       ## DEBUG
-      # sc <- which(scores_considered$score=='timeliness' & scores_considered$extent=='Class: increase')
+      # sc <- which(scores_considered$score=='timeliness' & scores_considered$extent=='Class: normal')
 
       extent <- scores_considered[sc,'extent'][[1]]
       score_type <- scores_considered[sc,'score'][[1]]
@@ -856,7 +913,7 @@ if (compute_scores) {
 
 if (plot_results) {
 
-  t5 <- Sys.time()
+  # t7 <- Sys.time()
   plots_overview_list <- list()
   plots_combined_eval_list <- list()
   timeliness_cum_distrib_df_all <-NULL
@@ -884,6 +941,7 @@ if (plot_results) {
         ifelse(is.na(interest), '', paste0('-', interest)))
 
       ## DEBUG
+      # ids <- scenarios %>% filter(interesting=='steady_state') %>% pull(id_scenario) %>% unique()
       # ids <- scenarios %>% filter(interesting=='lockdown') %>% pull(id_scenario) %>% unique()
       # ids <- scenarios %>% filter(interesting=='relapse') %>% pull(id_scenario) %>% unique()
       # sm <- 'project'
@@ -953,29 +1011,28 @@ if (plot_results) {
               score_type='pod') %>%
             select(id_scenario, sim_method, detect_method, score_type, extent, alpha, score_value)
         )
-      timeliness_cum_distrib_df_all <- bind_rows(timeliness_cum_distrib_df_all,
-        timeliness_cum_distrib_df)
-      scores_alpha_df_all <- bind_rows(scores_alpha_df_all, scores_alpha_df)
+      timeliness_cum_distrib_df_all <- timeliness_cum_distrib_df_all %>%
+        bind_rows(timeliness_cum_distrib_df)
+      scores_alpha_df_all <- scores_alpha_df_all %>% bind_rows(scores_alpha_df)
 
       # Optimal alpha's for each scenario and simulation method:
       # alpha(pod) = maximize probability of detection within `overall_params$d_min_period` days
       # alpha(ba) = maximize balanced accuracy of class of interest
       # alpha(f1) = maximize F1 of class of interest
       # alpha(sensitivity) = sensitivity of class of interest closest to 0.9
-      # When there are many optimal alpha's, the smallest alpha is taken.
+      # When there are many optimal alpha's, the smallest value is taken so as to be conservative
+      # and avoid subsequent false increase or decrease alarms.
+      # alpha=0 and alpha=1 are excluded as potential optima as they have no practical value.
       optimal_alphas <- NULL
       for (sty in c('pod', 'ba', 'f1', 'sensitivity')) {
         ## DEBUG
         # sty <- 'pod'
         # sty <- 'sensitivity'
-        alpha_opt <- scores_alpha_df %>%
-          filter(score_type==sty)
+        alpha_opt <- scores_alpha_df %>% filter(score_type==sty, !alpha %in% c(0,1))
         if (sty=='sensitivity') {
-          alpha_opt <- alpha_opt %>%
-            mutate(score_value_opt=-abs(score_value-0.9))
+          alpha_opt <- alpha_opt %>% mutate(score_value_opt=-abs(score_value-0.9))
         } else {
-          alpha_opt <- alpha_opt %>%
-            mutate(score_value_opt=score_value)
+          alpha_opt <- alpha_opt %>% mutate(score_value_opt=score_value)
         }
         alpha_opt <- alpha_opt %>%
           group_by(detect_method, score_type, extent) %>%
@@ -983,11 +1040,11 @@ if (plot_results) {
           filter(alpha==min(alpha)) %>%
           ungroup() %>%
           select(id_scenario, sim_method, detect_method, score_type, extent, alpha, score_value)
-        optimal_alphas <- bind_rows(optimal_alphas, alpha_opt)
+        optimal_alphas <- optimal_alphas %>% bind_rows(alpha_opt)
       }
       optimal_alphas <- optimal_alphas %>%
         arrange(id_scenario, sim_method, detect_method, score_type, extent)
-      optimal_alphas_all <- bind_rows(optimal_alphas_all, optimal_alphas)
+      optimal_alphas_all <- optimal_alphas_all %>% bind_rows(optimal_alphas)
 
       scores_alpha_plot <- ggplot(scores_alpha_df %>%
           mutate(detect_method=gsub('_',' ',detect_method)) %>%
@@ -1028,7 +1085,7 @@ if (plot_results) {
         detect_example_plot_df <- detect_examples[[ids]][[dm]][[as.character(alpha_opt_dm)]]
         if (grepl('ASMODEE', dm)) {
           detect_example_plot <- plot(detect_example_plot_df, 'date', point_size=1, guide=F)
-        } else if (dm=='NegBin') {
+        } else if (dm %in% c('modified_Farrington', 'NegBin')) {
           detect_example_plot <-
             ggplot(detect_example_plot_df, aes(x=sim_step, y=count), point_size=1, guide=F) +
             geom_vline(
@@ -1057,21 +1114,28 @@ if (plot_results) {
       }
 
       # Probability of detection vs. delay to detection
+      # for selected values of alpha in `overall_params$alpha_plot_pod`
+      timeliness_alpha_colors <- colorRampPalette(
+        c(vega_standard_palette[1], vega_standard_palette[2]))(length(overall_params$alpha_plot_pod)
+        )
       timeliness_alpha_plot <- ggplot(timeliness_cum_distrib_df %>%
+          filter(alpha %in% overall_params$alpha_plot_pod) %>%
           mutate(detect_method=gsub('_',' ',detect_method)),
-        aes(x=score_value, y=cum_freq, group=alpha, color=alpha)) +
+        aes(x=score_value, y=cum_freq, color=as.factor(alpha))) +
         geom_line() +
-        geom_point() +
-        geom_point(data=timeliness_cum_distrib_df %>%
-            filter(score_value==max(score_value)) %>%
-            group_by(detect_method) %>%
-            filter(cum_freq==max(cum_freq)) %>%
-            ungroup() %>%
-            mutate(detect_method=gsub('_',' ',detect_method)),
-          shape=1, size=4, color='black') +
+        geom_point(shape=16) +
+        # geom_point(data=timeliness_cum_distrib_df %>%
+        #     filter(score_value==max(score_value)) %>%
+        #     group_by(detect_method) %>%
+        #     filter(cum_freq==max(cum_freq)) %>%
+        #     ungroup() %>%
+        #     mutate(detect_method=gsub('_',' ',detect_method)),
+        #   shape=1, size=4, color='black') +
+        scale_color_manual(values=timeliness_alpha_colors) +
+        scale_fill_manual(values=timeliness_alpha_colors) +
         ylim(c(0,1)) +
         facet_wrap(~detect_method, ncol=length(overall_params$detect_algos)) +
-        labs(x='detection interval (days)', y='probability') +
+        labs(x='detection interval (days)', y='probability', color='alpha') +
         ggtitle(paste('scenario: ', gsub('_', ' ', ifelse(is.na(interest), ids,
           ifelse(interest=='flareup', 'flare-up', interest)))),
           subtitle=paste0('evaluation on class "', class_last_period, '"')) +
@@ -1082,7 +1146,7 @@ if (plot_results) {
       ggsave(timeliness_alpha_plot, filename=here(compare_algos_relative_path,
         paste0('timeliness_alpha', file_suffix_compare_algos, '.png')),
         height=15, width=25, units='cm', dpi=150)
-      # For the overview, discard scenario "steady state" as the scores are trivial
+      # For the overview, discard scenario "steady state" for the plot as the scores are trivial
       if (interest != 'steady_state') {
         plots_combined_eval_list[[sm]][['timeliness']][[as.character(ids)]] <- timeliness_alpha_plot
       }
@@ -1199,7 +1263,8 @@ if (plot_results) {
             height=12, width=25, units='cm', dpi=150)
           # For the overview, discard scenario "steady state" as the scores are trivial
           if (interest != 'steady_state') {
-            plots_combined_eval_list[[sm]][['score_distrib']][[as.character(ids)]] <- score_distrib_plot
+            plots_combined_eval_list[[sm]][['score_distrib']][[as.character(ids)]] <-
+              score_distrib_plot
           }
         } else {
           score_distrib_plot <- score_distrib_plot +
@@ -1237,10 +1302,10 @@ if (plot_results) {
       nrow=length(plots_combined_eval_list[[sm]][['timeliness']]))
     ggsave(plots_combined_timeliness, filename=here(overview_relative_path,
       paste0('overview-timeliness', file_suffix_overview, '.pdf')),
-      width=20, height=25, unit='cm')
+      width=20, height=20, unit='cm')
     ggsave(plots_combined_timeliness, filename=here(overview_relative_path,
       paste0('overview-timeliness', file_suffix_overview, '.png')),
-      width=20, height=25, unit='cm', dpi=150)
+      width=20, height=20, unit='cm', dpi=150)
 
     plots_combined_score_distrib <- arrangeGrob(
       grobs=plots_combined_eval_list[[sm]][['score_distrib']],
@@ -1257,9 +1322,9 @@ if (plot_results) {
   saveRDS(scores_alpha_df_all, here(data_relative_path, 'scores_alpha_df_all.rds'))
   saveRDS(optimal_alphas_all, here(data_relative_path, 'optimal_alphas_all.rds'))
 
-  # t6 <- Sys.time()
+  # t8 <- Sys.time()
   # print('Time elapsed for plotting:')
-  # print(t6-t5)
+  # print(t8-t7)
 
 } else {
 
@@ -1277,33 +1342,42 @@ CleanCCGName <- function (name_vec) {
   return(ccg_names)
 }
 
-if (illustration_ccgs) {
+# Reproducing and following https://github.com/thibautjombart/nhs_pathways_monitoring/blob/master/content/post/2020-05-31-analyses-ccg.Rmd
+# Published here: https://covid19-nhs-pathways-asmodee.netlify.app/
 
-  # Reproducing and following https://github.com/thibautjombart/nhs_pathways_monitoring/blob/master/content/post/2020-05-31-analyses-ccg.Rmd
-  # Published here: https://covid19-nhs-pathways-asmodee.netlify.app/
+# Parameters
+# Duration of Leicester cluster suggested to be at least 11-24 June:
+#     https://www.bbc.com/news/uk-england-leicestershire-53257835
+# Lockdown was imposed on 29 June 2020 and covers Leicester City CCG" nhs_leicester_city" as well
+# as small (but populous?) parts of East Leicestershire and Rutland
+# "nhs_east_leicestershire_and_rutland" and West Leicestershire "nhs_west_leicestershire":
+#     https://in.reuters.com/article/health-coronavirus-britain-leicester-idINL8N2E66DY
+#     https://www.bbc.com/news/uk-england-leicestershire-53229371
+#     https://geoportal.statistics.gov.uk/datasets/clinical-commissioning-groups-april-2020-full-clipped-boundaries-en?geometry=-1.698%2C52.559%2C-0.544%2C52.705
+# However these two surrounding CCG's don't show a stark uptick in cases.
+#
+# We also look at Blackburn "nhs_blackburn_with_darwen". It has had increased restrictions from
+# 25 July onward (https://www.gov.uk/government/news/pausing-of-lockdown-easements-in-blackburn-with-darwen-and-luton)
+# and a lockdown from 9 August onward (https://www.lancashiretelegraph.co.uk/news/18629208.rules-lockdown-blackburn-parts-e-lancs/).
+#
+# Greater Manchester has experienced a larger outbreak at the end of July but none of the CCG's
+# looked at showed marked outbreaks in the case counts ("nhs_manchester", "nhs_bury",
+# "nhs_salford" and "nhs_trafford")
 
-  # Parameters
-  # Duration of Leicester cluster suggested to be at least 11-24 June:
-  #     https://www.bbc.com/news/uk-england-leicestershire-53257835
-  # Lockdown was imposed on 29 June 2020 and covers Leicester City CCG" nhs_leicester_city" as well
-  # as small (but populous?) parts of East Leicestershire and Rutland
-  # "nhs_east_leicestershire_and_rutland" and West Leicestershire "nhs_west_leicestershire":
-  #     https://in.reuters.com/article/health-coronavirus-britain-leicester-idINL8N2E66DY
-  #     https://www.bbc.com/news/uk-england-leicestershire-53229371
-  #     https://geoportal.statistics.gov.uk/datasets/clinical-commissioning-groups-april-2020-full-clipped-boundaries-en?geometry=-1.698%2C52.559%2C-0.544%2C52.705
-  # However these two surrounding CCG's don't show a stark uptick in cases.
-  #
-  # We also look at Blackburn "nhs_blackburn_with_darwen".
-  # Greater Manchester has experienced a larger outbreak at the end of July but none of the CCG's
-  # looked at showed marked outbreaks in the case counts ("nhs_manchester", "nhs_bury",
-  # "nhs_salford" and "nhs_trafford")
+selected_ccgs <- c('nhs_leicester_city', 'nhs_blackburn_with_darwen')
+# 'nhs_east_leicestershire_and_rutland', 'nhs_west_leicestershire', 'nhs_manchester',
+# 'nhs_bury', 'nhs_salford', 'nhs_trafford'
+lockdown_start <- list(
+  nhs_leicester_city = as.Date('2020-06-29'),
+  nhs_blackburn_with_darwen = as.Date('2020-08-09')
+)
 
-  # t7 <- Sys.time()
-  selected_ccgs <- c('nhs_leicester_city', 'nhs_blackburn_with_darwen')
-    # 'nhs_east_leicestershire_and_rutland', 'nhs_west_leicestershire', 'nhs_manchester',
-    # 'nhs_bury', 'nhs_salford', 'nhs_trafford'
-  date_range_selected <- seq(as.Date('2020-06-01'), as.Date('2020-07-31'), by='day')
+if (compute_ccgs) {
+
+  # t9 <- Sys.time()
+  date_range_selected <- seq(as.Date('2020-06-01'), as.Date('2020-08-10'), by='day')
   alpha_nhs <- 0.05
+  asmodee_conf_vec <- c('manual_7') # , 'manual_12', 'opt')
 
   # define candidate models
   models <- list(
@@ -1339,7 +1413,6 @@ if (illustration_ccgs) {
   asmodee_selected_plot <- list()
   res_ccg_calls_list <- list()
   ccg_rank_date_all <- NULL
-  # t0 <- Sys.time()
 
   # Try three configurations for ASMODEE:
   # - manual_7: with fixed k=7, method `evaluate_aic`, a period of observation of 7 days and
@@ -1349,16 +1422,13 @@ if (illustration_ccgs) {
   # - optimal: with optimal k, the same method as in the simulations, a period of observation of
   #   `overall_params$d_observation_period`, as in the simulations and alpha taking the value
   #   that maximizes the probability of detection in the "relapse" simulation scenario above
-  for (asmodee_conf in c('manual_7')) { #}, 'manual_12', 'opt')) {
+  for (asmodee_conf in asmodee_conf_vec) {
 
     res_ccg_calls_list[[asmodee_conf]] <- list()
     asmodee_selected_plot[[asmodee_conf]] <- list()
     ccg_rank_date <- NULL
 
     for (i in 1:length(date_range_selected)) {
-
-      # cat(i, '/', length(date_range_selected), '\n')
-      # print(Sys.time()-t0)
 
       last_date <- date_range_selected[i]
       first_date <- last_date - overall_params$n_sim_steps + 1
@@ -1384,7 +1454,7 @@ if (illustration_ccgs) {
               models = models,
               method = asmodee_params$method,
               fixed_k = 7,
-              alpha = 0.05
+              alpha = alpha_nhs
             )
         )
       } else if (asmodee_conf=='manual_12') {
@@ -1396,7 +1466,7 @@ if (illustration_ccgs) {
               models = models,
               method = asmodee_params$method,
               fixed_k = 12,
-              alpha = 0.05
+              alpha = alpha_nhs
             )
         )
       } else if (asmodee_conf=='opt') {
@@ -1454,6 +1524,30 @@ if (illustration_ccgs) {
       ccg_rank_date %>% mutate(asmodee_conf=asmodee_conf)
     )
 
+
+  }
+  saveRDS(res_ccg_calls_list, here(data_relative_path, 'res_ccg_calls_list.rds'))
+  saveRDS(asmodee_selected_plot, here(data_relative_path, 'asmodee_selected_plot.rds'))
+  saveRDS(ccg_rank_date_all, here(data_relative_path, 'ccg_rank_date_all.rds'))
+
+  # t10 <- Sys.time()
+  # print('Time elapsed for Leicester:')
+  # print(t10-t9)
+
+} else {
+
+  res_ccg_calls_list <- readRDS(here(data_relative_path, 'res_ccg_calls_list.rds'))
+  asmodee_selected_plot <- readRDS(here(data_relative_path, 'asmodee_selected_plot.rds'))
+  ccg_rank_date_all <- readRDS(here(data_relative_path, 'ccg_rank_date_all.rds'))
+
+}
+
+if (plot_ccgs) {
+
+  for (asmodee_conf in unique(ccg_rank_date_all$asmodee_conf)) {
+
+    ccg_rank_date <- ccg_rank_date_all %>% filter(asmodee_conf==asmodee_conf)
+
     for (sc in selected_ccgs) {
       ccg_name <- CleanCCGName(sc)
       asmodee_selected_plot_combined <- arrangeGrob(
@@ -1487,7 +1581,7 @@ if (illustration_ccgs) {
       'How ',
       paste(sapply(selected_ccgs[-length(selected_ccgs)], function (sc)
         paste0('<b style="color:', ccgs_colors[[sc]], '">', CleanCCGName(sc), '</b>')),
-          collapse=', '),
+        collapse=', '),
       ifelse(length(selected_ccgs)==1, '', ' and '),
       paste0('<b style="color:', ccgs_colors[[tail(selected_ccgs,1)]], '">',
         CleanCCGName(tail(selected_ccgs,1)), '</b>'),
@@ -1495,7 +1589,7 @@ if (illustration_ccgs) {
       ' to other CCG\'s.'
     )
     ccg_selected_nincrease_plot <- ggplot(
-      ccg_rank_date %>% filter(! ccg_name %in% selected_ccgs),
+      ccg_rank_date %>% filter(!ccg_name %in% selected_ccgs),
       aes(date, n_increase, fill=ccg_name, color=ccg_name)) +
       geom_line(alpha=0.3,
         position = position_jitter(width=0.05, height=0.1, seed = 1)) +
@@ -1503,7 +1597,12 @@ if (illustration_ccgs) {
         position = position_jitter(width=0.07, height=0.1, seed = 1)) +
       geom_line(data=ccg_rank_date %>% filter(ccg_name %in% selected_ccgs),
         color='black', size=1.4,
-        position = position_jitter(width=0.07, height=0.1, seed = 2)) +
+        position = position_jitter(width=0.07, height=0.1, seed = 2))
+    for (ccg in names(lockdown_start)) {
+      ccg_selected_nincrease_plot <- ccg_selected_nincrease_plot +
+        geom_vline(xintercept=lockdown_start[[ccg]]-0.5, color=ccgs_colors[[ccg]], size=1, alpha=0.75)
+    }
+    ccg_selected_nincrease_plot <- ccg_selected_nincrease_plot +
       geom_line(data=ccg_rank_date %>% filter(ccg_name %in% selected_ccgs), size=0.9,
         position = position_jitter(width=0.07, height=0.1, seed = 2)) +
       geom_point(data=ccg_rank_date %>% filter(ccg_name %in% selected_ccgs),
@@ -1513,7 +1612,6 @@ if (illustration_ccgs) {
       scale_fill_manual(values=ccgs_colors) +
       scale_y_continuous(breaks=0:max(ccg_rank_date$n_increase)) +
       ggtitle(ccgs_compare_title) +
-      xlab(NULL) +
       ylab('number of *increase* days') +
       theme_bw() +
       theme(
@@ -1525,6 +1623,13 @@ if (illustration_ccgs) {
         panel.grid.minor.y = element_blank()) +
       scale_x_date(date_labels = format("%d %b"))
 
+    ggsave(ccg_selected_nincrease_plot,
+      filename=here(ccgs_relative_path, paste0('ccg_selected_nincrease_plot_', asmodee_conf, '.pdf')),
+      width=20, height=12, unit='cm')
+    ggsave(ccg_selected_nincrease_plot,
+      filename=here(ccgs_relative_path, paste0('ccg_selected_nincrease_plot_', asmodee_conf, '.png')),
+      width=20, height=12, unit='cm', dpi=150)
+
     ccg_selected_rank_plot <- ggplot(
       ccg_rank_date %>% filter(! ccg_name %in% selected_ccgs),
       aes(date, rank, fill=ccg_name, color=ccg_name)) +
@@ -1534,7 +1639,12 @@ if (illustration_ccgs) {
         position = position_jitter(width=0.1, height=1.5, seed = 1)) +
       geom_line(data=ccg_rank_date %>% filter(ccg_name %in% selected_ccgs),
         color='black', size=1.4,
-        position = position_jitter(width=0.1, height=1.5, seed = 2)) +
+        position = position_jitter(width=0.1, height=1.5, seed = 2))
+    for (ccg in names(lockdown_start)) {
+      ccg_selected_nincrease_plot <- ccg_selected_nincrease_plot +
+        geom_vline(xintercept=lockdown_start[[ccg]]-0.5, color=ccgs_colors[[ccg]])
+    }
+    ccg_selected_rank_plot <- ccg_selected_rank_plot +
       geom_line(data=ccg_rank_date %>% filter(ccg_name %in% selected_ccgs), size=0.9,
         position = position_jitter(width=0.1, height=1.5, seed = 2)) +
       geom_point(data=ccg_rank_date %>% filter(ccg_name %in% selected_ccgs),
@@ -1551,7 +1661,7 @@ if (illustration_ccgs) {
       scale_x_date(date_labels = format("%d %b"))
 
     ccg_selected_plot_combined <- arrangeGrob(
-      grobs=list(ccg_selected_nincrease_plot, ccg_selected_rank_plot),
+      grobs=list(ccg_selected_nincrease_plot + xlab(NULL), ccg_selected_rank_plot),
       as.table=T,
       ncol=1
     )
@@ -1561,13 +1671,38 @@ if (illustration_ccgs) {
     ggsave(ccg_selected_plot_combined,
       filename=here(ccgs_relative_path, paste0('ccg_selected_plot_combined_', asmodee_conf, '.png')),
       width=25, height=20, unit='cm', dpi=150)
-  }
-  saveRDS(res_ccg_calls_list, here(data_relative_path, 'res_ccg_calls_list.rds'))
-  saveRDS(asmodee_selected_plot, here(data_relative_path, 'asmodee_selected_plot.rds'))
-  saveRDS(ccg_rank_date_all, here(data_relative_path, 'ccg_rank_date_all.rds'))
 
-  # t8 <- Sys.time()
-  # print('Time elapsed for Leicester:')
-  # print(t8-t7)
+    ccg_selected_nincrease_heatmap <- ggplot(ccg_rank_date,
+      aes(date, CleanCCGName(ccg_name), fill=n_increase)) +
+      geom_tile() +
+      scale_fill_gradient(low=vega_standard_palette[1], high=vega_standard_palette[2]) +
+      labs(y='CCG', fill='number of\nincrease days') +
+      theme_bw() +
+      theme(panel.grid = element_blank())
+    ggsave(ccg_selected_nincrease_heatmap,
+      filename=here(ccgs_relative_path,
+        paste0('ccg_selected_nincrease_heatmap_', asmodee_conf, '.pdf')),
+      width=25, height=50, unit='cm')
+    ggsave(ccg_selected_nincrease_heatmap,
+      filename=here(ccgs_relative_path,
+        paste0('ccg_selected_nincrease_heatmap_', asmodee_conf, '.png')),
+      width=25, height=50, unit='cm', dpi=150)
+
+    ccg_selected_rank_heatmap <- ggplot(ccg_rank_date,
+      aes(date, CleanCCGName(ccg_name), fill=rank)) +
+      geom_tile() +
+      scale_fill_gradient(high=vega_standard_palette[1], low=vega_standard_palette[2]) +
+      labs(y='CCG', fill='rank') +
+      theme_bw() +
+      theme(panel.grid = element_blank())
+    ggsave(ccg_selected_rank_heatmap,
+      filename=here(ccgs_relative_path,
+        paste0('ccg_selected_rank_heatmap_', asmodee_conf, '.pdf')),
+      width=25, height=50, unit='cm')
+    ggsave(ccg_selected_rank_heatmap,
+      filename=here(ccgs_relative_path,
+        paste0('ccg_selected_rank_heatmap_', asmodee_conf, '.png')),
+      width=25, height=50, unit='cm', dpi=150)
+  }
 
 }
