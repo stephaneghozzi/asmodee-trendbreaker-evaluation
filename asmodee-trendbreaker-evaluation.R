@@ -22,9 +22,9 @@ library(surveillance)
 compute_simulations <- F
 compute_detections <- F
 compute_scores <- F
-plot_results <- F
+plot_results <- T
 compute_ccgs <- F
-plot_ccgs <- T
+plot_ccgs <- F
 download_nhs_pathways <- F
 
 ### Scenarios and simulations ----
@@ -1087,10 +1087,15 @@ if (plot_results) {
           detect_example_plot <- plot(detect_example_plot_df, 'date', point_size=1, guide=F)
         } else if (dm %in% c('modified_Farrington', 'NegBin')) {
           detect_example_plot <-
-            ggplot(detect_example_plot_df, aes(x=sim_step, y=count), point_size=1, guide=F) +
-            geom_vline(
-              xintercept = overall_params$n_sim_steps - overall_params$d_observation_period + 1 - 0.5,
-              linetype = 2) +
+            ggplot(detect_example_plot_df, aes(x=sim_step, y=count), point_size=1, guide=F)
+          if (dm=='NegBin') {
+            detect_example_plot <- detect_example_plot +
+              geom_vline(
+                xintercept=overall_params$n_sim_steps-overall_params$d_observation_period+1-0.5,
+                linetype=2
+              )
+          }
+          detect_example_plot <- detect_example_plot +
             geom_ribbon(aes(ymin=ci_lb, ymax=ci_ub), alpha = 0.4, fill='#BBB67E') +
             geom_point(aes(color=classification), size = 1 +
                 detect_example_plot_df %>% mutate(psize=ifelse(classification=='normal', 0, 1)) %>%
