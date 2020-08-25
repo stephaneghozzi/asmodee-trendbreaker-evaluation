@@ -1,7 +1,7 @@
 library(surveillance)
 
 ff_control <- list(
-  b=floor((overall_params$n_sim_steps-overall_params$d_observation_period-3)/7),
+  b=3,
   w=3,
   limit54=c(0,1),
   noPeriods=7,
