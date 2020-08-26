@@ -17,30 +17,23 @@ library(tools)
 library(ggtext)
 library(surveillance)
 
+# A new version of the `farringtonFlexible` function written by Michael Höhle:
+# - offers the option of removing the safeguard against extrapolating trend through
+#   `safeguardAgainstExtrapolation=F`
+# - defines bounds on one-side p-values of the prediction interval
+source(here('farrington', 'farringtonFlexible.R'))
+
 ### Global parameters ----
 
 compute_simulations <- F
-compute_detections <- F
-compute_scores <- F
+compute_detections <- T
+compute_scores <- T
 plot_results <- T
 compute_ccgs <- F
 plot_ccgs <- F
 download_nhs_pathways <- F
 
 ### Scenarios and simulations ----
-#
-# Notes to myself...
-# projections::project
-# ~ surveillance::sim.pointSource but with fixed outbreaks ~ scenarios
-# Future: ~SIR, ~ARIMA
-# https://ourworldindata.org/coronavirus-data-explorer?zoomToSelection=true&casesMetric=true&dailyFreq=true&smoothing=7&country=~GBR&pickerMetric=location&pickerSort=asc
-#   UK: peak = ~ 18 April - 7 May;
-#       stable downward trend since ~ 3 June: ~1900 cases/day -> ~930 cases/day (1 July)
-# https://epiforecasts.io/covid/posts/national/united-kingdom/:
-#   UK: R ~ 0.9-1.0 (10 April - 30 April, 10 June - 1 July), ~ 0.7-0.9 (1 May - 9 June)
-#   worst regions: R ~ 0.7-1.3 (1 July)
-# https://covid19-nhs-pathways-asmodee.netlify.app/
-#   CGGs: ~200 cases/day (15 May) -> ~100 cases/day  (30 June)
 
 ## Parameters
 
@@ -154,7 +147,9 @@ ff_control <- list(
   pastWeeksNotIncluded=7,
   glmWarnings=F,
   thresholdMethod='nbPlugin',
-  pThresholdTrend=1
+  pThresholdTrend=1,
+  safeguardAgainstExtrapolation=F # new option of `farringtonFlexible` from the modified
+  # farringtonFlexible.R script
 )
 
 # Consistency checks
@@ -498,27 +493,13 @@ if (compute_simulations) {
 
 ### Apply detection algorithms ----
 #
-# TODO: Benchmarks:
-# - PHE's RAMMIE (if available)
-# - `surveillance::farringtonFlexible` with apprpriate parameters
-# - {tscount}
-# - {changepoint}
-#
-# TODO: Save ASMODEE examples for different simulation methods and alpha's.
-
-# All combinations of simulations and detection parameters leading to as many detection runs.
-# TODO: In {trendbreaker}, add quantile of observation to output of asmodee. Maybe
-# using {caret} or {tidymodels} instead of {stats}/{MASS} might be options.
-# Here itemizing alpha is a quick fix because as of now computing quantiles of the
-# observations under the model considered is model dependent and cumbersome.
+# TODO: For NegBin and farringtonFlexible, don't loop over and retrain for each `alpha` but
+#       train once and apply cut-offs on quantiles computed from the Negative Binoomial
+#       distribution.
 
 ClassifyCountCI <- function(cnt, ci) {
   # Classify observed counts `cnt` as "decrease", "normal", "increase" if they are below, within or
   # above the confidence interval `ci`.
-
-  ## DEBUG
-  # cnt <- count_timeseries$count
-  # ci <- ff_ci
 
   classification <- c()
   for (i in 1:length(cnt)) {
@@ -536,6 +517,7 @@ ClassifyCountCI <- function(cnt, ci) {
   return(classification)
 }
 
+# All combinations of simulations and detection parameters leading to as many detection runs.
 detection_comb <- simulations %>%
   select(interesting, id_scenario, sim_method, id_start_comb, sim_run) %>%
   unique() %>%
@@ -653,17 +635,17 @@ if (compute_detections) {
     } else if (dm=='modified_Farrington') {
 
       sts <- sts(count_timeseries$count, frequency=7)
-      ff_out <- farringtonFlexible(sts, control = append(list(alpha=al), ff_control))
+      ff_out <- farringtonFlexible(sts, control=append(list(alpha=al), ff_control))
       ff_size <- ff_out@control$mu0Vector/(ff_out@control$phiVector-1)
       ff_mu <- ff_out@control$mu0Vector
       ff_ci <- list(
         lowerbound = c(
           rep(NA, overall_params$n_sim_steps-length(ff_out@epoch)),
-          qnbinom(al/2, size=ff_size, mu=ff_mu)
+          qnbinom(al, size=ff_size, mu=ff_mu)
         ),
         upperbound = c(
           rep(NA, overall_params$n_sim_steps-length(ff_out@epoch)),
-          qnbinom(1-al/2, size=ff_size, mu=ff_mu)
+          qnbinom(1-al, size=ff_size, mu=ff_mu)
         )
       )
       detection_res <- count_timeseries %>%
@@ -717,12 +699,6 @@ if (compute_detections) {
 # Periods before the last are considered "normal", the last belongs to the class `period trend`.
 # The evaluation is done on the last `d_max_last_period` simulation steps.
 
-# References for multi-class scores:
-# https://scikit-learn.org/stable/modules/generated/sklearn.metrics.classification_report.html#sklearn.metrics.classification_report
-# https://scikit-learn.org/stable/modules/generated/sklearn.metrics.precision_recall_fscore_support.html#sklearn.metrics.precision_recall_fscore_support
-# https://topepo.github.io/caret/measuring-performance.html#measures-for-class-probabilities
-# https://www.datascienceblog.net/post/machine-learning/performance-measures-multi-class-problems/
-
 scores_considered <- expand.grid(
   score = overall_params$score_types[overall_params$score_types!='pod'],
   extent = c('micro','macro','weighted', paste('Class:', overall_params$classes)),
@@ -751,7 +727,6 @@ if (compute_scores) {
     # idc <- detection_comb %>% filter(interesting=='steady_state' & sim_method=='project' & sim_run==1 & detect_method=='ASMODEE_optimal' & alpha==0.4) %>% pull(id_detect_comb)
     # idc <- detection_comb %>% filter(interesting=='lockdown' & sim_method=='project' & sim_run==60 & detect_method=='ASMODEE_optimal' & alpha==0.05) %>% pull(id_detect_comb)
 
-
     # cat('sim: ', idc, ' / ', round(100*idc/nrow(detection_comb)), '%\n', sep='')
     # print(Sys.time()-t5)
 
@@ -767,7 +742,6 @@ if (compute_scores) {
       pull(period_start)
 
     test_detection <- detections %>% filter(id_detect_comb==idc) %>% select(classification, class)
-    # test_detection <- detections %>% filter(id_scenario==ids & sim_method==sm & sim_run==sr & detect_method==dm & alpha==al) %>% select(classification, class)
 
     # Classification scores
     cm <- confusionMatrix(
@@ -901,15 +875,6 @@ if (compute_scores) {
 # - ROC curve (average over runs) with AUC
 # - precision-recall curve (average over runs)
 # - score distributions for alpha = 0.05
-#
-# TODO:
-# - include different simulation methods in the figure output
-# - compute AUC...? The "ROC curves" look weird with the 3 classes, not sure AUC makes sense
-# - confidence intervals around score averages
-# - score distributions (for each scenario) for alpha(sensitivity==0.9) and alpha(F1==F1max)
-# - distributions overall scenarios of alpha(sensitivity==0.9) and alpha(F1==F1max)
-# - for each scenario and all scenarios combined: overall scores instead of averages => sums of
-#   confusion matrices
 
 if (plot_results) {
 
@@ -1129,13 +1094,6 @@ if (plot_results) {
         aes(x=score_value, y=cum_freq, color=as.factor(alpha))) +
         geom_line() +
         geom_point(shape=16) +
-        # geom_point(data=timeliness_cum_distrib_df %>%
-        #     filter(score_value==max(score_value)) %>%
-        #     group_by(detect_method) %>%
-        #     filter(cum_freq==max(cum_freq)) %>%
-        #     ungroup() %>%
-        #     mutate(detect_method=gsub('_',' ',detect_method)),
-        #   shape=1, size=4, color='black') +
         scale_color_manual(values=timeliness_alpha_colors) +
         scale_fill_manual(values=timeliness_alpha_colors) +
         ylim(c(0,1)) +
@@ -1362,12 +1320,14 @@ CleanCCGName <- function (name_vec) {
 # However these two surrounding CCG's don't show a stark uptick in cases.
 #
 # We also look at Blackburn "nhs_blackburn_with_darwen". It has had increased restrictions from
-# 25 July onward (https://www.gov.uk/government/news/pausing-of-lockdown-easements-in-blackburn-with-darwen-and-luton)
-# and a lockdown from 9 August onward (https://www.lancashiretelegraph.co.uk/news/18629208.rules-lockdown-blackburn-parts-e-lancs/).
+# 25 July onward:
+#     https://www.gov.uk/government/news/pausing-of-lockdown-easements-in-blackburn-with-darwen-and-luton
+# and a lockdown from 9 August onward:
+#     https://www.lancashiretelegraph.co.uk/news/18629208.rules-lockdown-blackburn-parts-e-lancs/
 #
 # Greater Manchester has experienced a larger outbreak at the end of July but none of the CCG's
 # looked at showed marked outbreaks in the case counts ("nhs_manchester", "nhs_bury",
-# "nhs_salford" and "nhs_trafford")
+# "nhs_salford" and "nhs_trafford").
 
 selected_ccgs <- c('nhs_leicester_city', 'nhs_blackburn_with_darwen')
 # 'nhs_east_leicestershire_and_rutland', 'nhs_west_leicestershire', 'nhs_manchester',
