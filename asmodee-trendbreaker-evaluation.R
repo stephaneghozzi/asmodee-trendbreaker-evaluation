@@ -3,11 +3,10 @@ library(MASS)
 library(epitrix)
 library(distcrete)
 library(tidyr)
-library(data.table)
-library(dtplyr)
-library(dplyr, warn.conflicts=F)
 library(projections)
 library(caret)
+# remotes::install_github("reconhub/trending@bootstrap")
+# remotes::install_github("reconhub/trendbreaker@bootstrap")
 library(trendbreaker)
 library(ggplot2)
 library(RColorBrewer)
@@ -16,22 +15,28 @@ library(grid)
 library(tools)
 library(ggtext)
 library(surveillance)
+library(data.table)
+library(dtplyr)
+library(dplyr, warn.conflicts=F)
 
 # A new version of the `farringtonFlexible` function written by Michael Höhle:
 # - offers the option of removing the safeguard against extrapolating trend through
 #   `safeguardAgainstExtrapolation=F`
-# - defines bounds on one-side p-values of the prediction interval
+# - defines bounds on one-side p-values of the prediction interval (bug fixed in
+#   version 1.19.0 of package `surveillance`)
 source(here('farrington', 'farringtonFlexible.R'))
+
 
 ### Global parameters ----
 
-compute_simulations <- F
+compute_simulations <- T
 compute_detections <- T
 compute_scores <- T
 plot_results <- T
-compute_ccgs <- F
-plot_ccgs <- F
+compute_ccgs <- T
+plot_ccgs <- T
 download_nhs_pathways <- F
+
 
 ### Scenarios and simulations ----
 
@@ -106,7 +111,7 @@ project_params <- list(
   R_means = c(mild_upward=1.3, strong_upward=2.5, constant=1, downward=0.8),
   R_sd = 0.1,
   init_duration = 14L,
-  init_incidence = list(high=10000L, medium=1000L, low=10L),
+  init_incidence = list(high=10000L, medium=1000L, low=100L),
   si_mean = 4.7,
   si_sd = 2.9
 )
@@ -133,7 +138,8 @@ asmodee_params <- list(
   method = evaluate_aic, # evaluate_resampling,
   models = list(
     poisson_constant = glm_model(count ~ 1, family='poisson'),
-    regression = lm_model(count ~ date),
+    # regression = lm_model(count ~ date),
+    poisson_time = glm_model(count ~ date, family = "poisson"),
     negbin_time = glm_nb_model(count ~ date)
   )
 )
@@ -314,7 +320,7 @@ scenarios <- expand.grid(
   filter(!is.na(trend)) %>%
   full_join(period_starts, by=c('n_periods', 'id_period')) %>%
   unique() %>%
-  select(id_scenario, sim_method, initial_level, n_periods, id_period, trend, id_start_comb,
+  dplyr::select(id_scenario, sim_method, initial_level, n_periods, id_period, trend, id_start_comb,
     period_start)
 
 # Annotate scenarios with interesting ones
@@ -334,7 +340,7 @@ if (!is.null(overall_params$interesting_scenarios)) {
       ))
 
     for (ids in scenarios %>% filter(!is.na(interesting)) %>% pull(id_scenario) %>% unique()) {
-      s_trends <- scenarios %>% filter(id_scenario==ids) %>% select(id_period, trend) %>%
+      s_trends <- scenarios %>% filter(id_scenario==ids) %>% dplyr::select(id_period, trend) %>%
         unique() %>% arrange(id_period) %>% pull(trend)
       if (!identical(s_trends, trends)) {
         scenarios <- scenarios %>%
@@ -351,7 +357,7 @@ if (overall_params$select_interesting_scenarios) {
 
 saveRDS(scenarios, here(data_relative_path, 'scenarios.rds'))
 
-## Generate simulations
+### Generate simulations ----
 
 if (compute_simulations) {
 
@@ -432,7 +438,7 @@ if (compute_simulations) {
             sim_run=as.integer(replicate)+run_offset,
             replicate=as.integer(replicate),
             class=NA) %>%
-          select(interesting, id_scenario, sim_method, id_start_comb, sim_run, replicate,
+          dplyr::select(interesting, id_scenario, sim_method, id_start_comb, sim_run, replicate,
             sim_step, count, class) %>%
           arrange(sim_run, sim_step)
         run_offset <- run_offset + overall_params$n_replicates
@@ -485,6 +491,64 @@ if (compute_simulations) {
 
   saveRDS(simulations, here(data_relative_path, 'simulations.rds'))
 
+  # In the flare-up scenario, count how many time series actually go up in the
+  # second period, according to 3 criteria: mean increases, median increases, or
+  # the 25th percentile of the second period is larger or equal to the 75th of
+  # the first.
+  sim_count_diff_flareup <- simulations %>%
+    filter(interesting == "flareup") %>%
+    dplyr::select(sim_run, count, class) %>%
+    group_by(sim_run, class) %>%
+    summarize(
+      mean_count = mean(count),
+      med_count = median(count),
+      q25_count = quantile(count, probs = 0.25),
+      q75_count = quantile(count, probs = 0.75)
+    ) %>%
+    mutate(ref_count = case_when(
+      class == "increase" ~ q25_count,
+      class == "normal" ~ q75_count,
+      TRUE ~ as.numeric(NA)))
+
+  prop_flareup_increase <- c()
+  for (countq in c("mean_count", "med_count", "ref_count")) {
+    prop_flareup_increase_df <- sim_count_diff_flareup %>%
+      dplyr::select(sim_run, class, all_of(countq)) %>%
+      pivot_wider(names_from = class, values_from = all_of(countq)) %>%
+      mutate(actual_increase = increase >= normal)
+
+    prop_flareup_increase <- c(
+      prop_flareup_increase,
+      sum(prop_flareup_increase_df$actual_increase) /
+        nrow(prop_flareup_increase_df)
+    )
+  }
+
+  overview_relative_path <- paste0(img_relative_path, '/sim-project/overview')
+  dir.create(overview_relative_path, showWarnings = FALSE, recursive = TRUE)
+  prop_flareup_increase_file <- file(here(overview_relative_path,
+    "prop_flareup_increase.txt"))
+  open(prop_flareup_increase_file, open = "w")
+  cat("In the flare-up scenario, proprtion of time-series that are actually",
+    "going up in the second period, according to three criteria: mean increases,",
+    "median increases, or the 25th percentile of the second period is larger or",
+    "equal to the 75th of the first.", "\n",
+    "Rt(normal) = ", project_params$R_means[[
+        overall_params$interesting_scenarios$flareup$trends[1]
+      ]], "\n",
+    "Rt(increase) = ", project_params$R_means[[
+      overall_params$interesting_scenarios$flareup$trends[2]
+    ]], "\n",
+    "initial incidence = ", project_params$init_incidence[[
+      overall_params$interesting_scenarios$flareup$initial_level
+    ]], "\n\n",
+    "mean: ", signif(prop_flareup_increase[1], digits = 4), "\n",
+    "median: ", signif(prop_flareup_increase[2], digits = 4), "\n",
+    "percentiles: ", signif(prop_flareup_increase[3], digits = 4), "\n",
+    sep = "",
+    file = prop_flareup_increase_file)
+  close(prop_flareup_increase_file)
+
 } else {
 
   simulations <- readRDS(here(data_relative_path, 'simulations.rds'))
@@ -519,10 +583,10 @@ ClassifyCountCI <- function(cnt, ci) {
 
 # All combinations of simulations and detection parameters leading to as many detection runs.
 detection_comb <- simulations %>%
-  select(interesting, id_scenario, sim_method, id_start_comb, sim_run) %>%
+  dplyr::select(interesting, id_scenario, sim_method, id_start_comb, sim_run) %>%
   unique() %>%
   mutate(id_detect_comb=row_number()) %>%
-  select(id_detect_comb, everything())
+  dplyr::select(id_detect_comb, everything())
 
 detectmeth_alpha_comb <- expand.grid(
   id_detect_comb = detection_comb$id_detect_comb,
@@ -568,7 +632,7 @@ if (compute_detections) {
 
     count_timeseries <- simulations %>%
       filter(id_scenario==ids & sim_run==sr) %>%
-      select(sim_step, count)
+      dplyr::select(sim_step, count)
 
     if(grepl('ASMODEE', dm)) {
       if (grepl('manual', dm)) {
@@ -577,7 +641,9 @@ if (compute_detections) {
           models = asmodee_params$models,
           alpha = al,
           fixed_k = asmodee_params$k_manual,
-          method = asmodee_params$method
+          method = asmodee_params$method,
+          uncertain = FALSE,
+          simulate_pi = TRUE
         )
       } else if (grepl('optimal', dm)) {
         asmodee_res <- asmodee(
@@ -585,7 +651,9 @@ if (compute_detections) {
           models = asmodee_params$models,
           alpha = al,
           max_k = asmodee_params$k_optimal_max,
-          method = asmodee_params$method
+          method = asmodee_params$method,
+          uncertain = FALSE,
+          simulate_pi = TRUE
         )
       } else {
         stop('Wrong ASMODEE method "', dm,
@@ -602,14 +670,14 @@ if (compute_detections) {
 
       detection_res <- asmodee_res$results %>%
         as_tibble() %>%
-        select(date, classification) %>%
+        dplyr::select(date, classification) %>%
         rename(sim_step = date)
 
     } else if (dm=='NegBin') {
 
       negbin_trainset <- count_timeseries %>%
         filter(sim_step < overall_params$n_sim_steps - overall_params$d_observation_period + 1) %>%
-        select(sim_step, count)
+        dplyr::select(sim_step, count)
       negbin_model <- glm.nb(count~1, link='log', data=negbin_trainset)
       if (al==0) {
         negbin_ci <- c(0,Inf)
@@ -623,7 +691,7 @@ if (compute_detections) {
       }
       detection_res <- count_timeseries %>%
         mutate(classification = ClassifyCountCI(count, negbin_ci)) %>%
-        select(sim_step, classification)
+        dplyr::select(sim_step, classification)
 
       if (sr==1 & sm=='project') {
         negbin_res <- count_timeseries %>%
@@ -635,22 +703,22 @@ if (compute_detections) {
     } else if (dm=='modified_Farrington') {
 
       sts <- sts(count_timeseries$count, frequency=7)
-      ff_out <- farringtonFlexible(sts, control=append(list(alpha=al), ff_control))
+      ff_out <- farringtonFlexible(sts, control=append(list(alpha=al/2), ff_control))
       ff_size <- ff_out@control$mu0Vector/(ff_out@control$phiVector-1)
       ff_mu <- ff_out@control$mu0Vector
       ff_ci <- list(
         lowerbound = c(
           rep(NA, overall_params$n_sim_steps-length(ff_out@epoch)),
-          qnbinom(al, size=ff_size, mu=ff_mu)
+          qnbinom(al/2, size=ff_size, mu=ff_mu)
         ),
         upperbound = c(
           rep(NA, overall_params$n_sim_steps-length(ff_out@epoch)),
-          qnbinom(1-al, size=ff_size, mu=ff_mu)
+          qnbinom(1-al/2, size=ff_size, mu=ff_mu)
         )
       )
       detection_res <- count_timeseries %>%
         mutate(classification = ClassifyCountCI(count, ff_ci)) %>%
-        select(sim_step, classification)
+        dplyr::select(sim_step, classification)
 
       if (sr==1 & sm=='project') {
         ff_res <- count_timeseries %>%
@@ -671,7 +739,7 @@ if (compute_detections) {
       mutate(id_detect_comb=idc, id_scenario=ids, sim_method=sm, sim_run=sr,
         detect_method=dm, alpha=al) %>%
       left_join(simulations, by=c('id_scenario', 'sim_method', 'sim_run', 'sim_step')) %>%
-      select(id_detect_comb, interesting, id_scenario, sim_method, sim_run, detect_method, alpha,
+      dplyr::select(id_detect_comb, interesting, id_scenario, sim_method, sim_run, detect_method, alpha,
         sim_step, count, classification, class)
 
     detections <- detections %>% bind_rows(detection_res)
@@ -741,7 +809,7 @@ if (compute_scores) {
       filter(id_period==max(id_period)) %>%
       pull(period_start)
 
-    test_detection <- detections %>% filter(id_detect_comb==idc) %>% select(classification, class)
+    test_detection <- detections %>% filter(id_detect_comb==idc) %>% dplyr::select(classification, class)
 
     # Classification scores
     cm <- confusionMatrix(
@@ -926,7 +994,7 @@ if (plot_results) {
       # Simulation runs
       sim_run_df <- simulations %>%
         filter(id_scenario==ids & sim_method==sm) %>%
-        select(sim_run, sim_step, count)
+        dplyr::select(sim_run, sim_step, count)
       sim_run_plot <- ggplot(sim_run_df, aes(sim_step, count, color=as.factor(sim_run))) +
         geom_line(size=0.3, alpha=0.2) +
         scale_color_manual(values=rep(major_minor_colors[['major']],
@@ -955,7 +1023,7 @@ if (plot_results) {
       n_sim_run <- simulations %>% filter(id_scenario==ids & sim_method==sm) %>%
         pull(sim_run) %>% unique() %>% length()
       timeliness_cum_distrib_df <- timeliness_df %>%
-        select(id_scenario, sim_method, detect_method, score_value, alpha) %>%
+        dplyr::select(id_scenario, sim_method, detect_method, score_value, alpha) %>%
         count(id_scenario, sim_method, detect_method, score_value, alpha) %>%
         complete(id_scenario, sim_method, detect_method, score_value, alpha, fill=list(n=0)) %>%
         filter(!is.na(score_value)) %>%
@@ -974,7 +1042,7 @@ if (plot_results) {
             filter(score_value==max(score_value)) %>%
             mutate(score_value=cum_freq, extent=paste('Class:', class_last_period),
               score_type='pod') %>%
-            select(id_scenario, sim_method, detect_method, score_type, extent, alpha, score_value)
+            dplyr::select(id_scenario, sim_method, detect_method, score_type, extent, alpha, score_value)
         )
       timeliness_cum_distrib_df_all <- timeliness_cum_distrib_df_all %>%
         bind_rows(timeliness_cum_distrib_df)
@@ -1004,7 +1072,7 @@ if (plot_results) {
           filter(score_value==max(score_value)) %>%
           filter(alpha==min(alpha)) %>%
           ungroup() %>%
-          select(id_scenario, sim_method, detect_method, score_type, extent, alpha, score_value)
+          dplyr::select(id_scenario, sim_method, detect_method, score_type, extent, alpha, score_value)
         optimal_alphas <- optimal_alphas %>% bind_rows(alpha_opt)
       }
       optimal_alphas <- optimal_alphas %>%
@@ -1026,7 +1094,10 @@ if (plot_results) {
         scale_fill_manual(values=score_colors) +
         ylim(c(0,1)) +
         ggtitle(paste('scenario: ', gsub('_', ' ', ifelse(is.na(interest), ids,
-          ifelse(interest=='flareup', 'flare-up', interest))))) +
+          ifelse(interest=='flareup', 'flare-up', interest)))),
+          subtitle = paste0("Multiclass classification: scores restricted on ",
+            "different periods (first column(s)) or on three classes at the ",
+            "same time (last three columns)")) +
         facet_wrap(detect_method ~ extent, nrow=length(overall_params$detect_algos)) +
         theme_bw()
       ggsave(scores_alpha_plot, filename=here(compare_algos_relative_path, paste0('scores_alpha',
@@ -1129,13 +1200,16 @@ if (plot_results) {
         ylim(c(0,1)) +
         facet_wrap(detect_method ~ extent, nrow=length(overall_params$detect_algos)) +
         ggtitle(paste('scenario: ', gsub('_', ' ', ifelse(is.na(interest), ids,
-          ifelse(interest=='flareup', 'flare-up', interest))))) +
+          ifelse(interest=='flareup', 'flare-up', interest)))),
+          subtitle = paste0("Multiclass classification: scores restricted on ",
+            "different periods (first column(s)) or on three classes at the ",
+            "same time (last three columns)")) +
         theme_bw()
       ggsave(roc_curve_plot, filename=here(compare_algos_relative_path,
-        paste0('roc_curve', file_suffix_compare_algos, '.pdf')),
+        paste0('tprfpr_curve', file_suffix_compare_algos, '.pdf')),
         height=22, width=35, units='cm')
       ggsave(roc_curve_plot, filename=here(compare_algos_relative_path,
-        paste0('roc_curve', file_suffix_compare_algos, '.png')),
+        paste0('tprfpr_curve', file_suffix_compare_algos, '.png')),
         height=22, width=35, units='cm', dpi=150)
 
       # Precision-recall curve (average over runs)
@@ -1153,7 +1227,10 @@ if (plot_results) {
         ylim(c(0,1)) +
         facet_wrap(detect_method ~ extent, nrow=length(overall_params$detect_algos)) +
         ggtitle(paste('scenario: ', gsub('_', ' ', ifelse(is.na(interest), ids,
-          ifelse(interest=='flareup', 'flare-up', interest))))) +
+          ifelse(interest=='flareup', 'flare-up', interest)))),
+          subtitle = paste0("Multiclass classification: scores restricted on ",
+            "different periods (first column(s)) or on three classes at the ",
+            "same time (last three columns)")) +
         theme_bw()
       ggsave(precrec_curve_plot, filename=here(compare_algos_relative_path,
         paste0('precrec_curve', file_suffix_compare_algos, '.pdf')),
@@ -1165,14 +1242,14 @@ if (plot_results) {
       # Score distributions over the runs
       alpha_opt <- optimal_alphas %>%
         filter(score_type==overall_params$alpha_opt_type) %>%
-        select(detect_method, alpha)
+        dplyr::select(detect_method, alpha)
       score_distrib_df <- test_results %>%
         filter(id_scenario==ids & sim_method==sm & score_type!='timeliness' &
             score_type %in% overall_params$score_types &
             detect_method %in% overall_params$detect_algos) %>%
         right_join(alpha_opt, by='detect_method', suffix=c('', '_optimal')) %>%
         filter(alpha==alpha_optimal) %>%
-        select(sim_run, score_type, extent, detect_method, score_value)
+        dplyr::select(sim_run, score_type, extent, detect_method, score_value)
 
       for (whichextents in c('all', 'period_class')) {
         score_distrib_df_whichextents <- score_distrib_df
@@ -1183,13 +1260,14 @@ if (plot_results) {
         score_distrib_plot <- ggplot(score_distrib_df_whichextents %>%
             mutate(detect_method=gsub('_',' ',detect_method)),
           aes(x=detect_method, y=score_value, fill=score_type)) +
-          geom_violin(color='black', trim=T, draw_quantiles=c(0.25, 0.5, 0.75)) +
+          geom_violin(color='grey50', trim=T, draw_quantiles=c(0.25, 0.5, 0.75),
+            alpha=0.1) +
           geom_point(data=score_distrib_df_whichextents %>%
               group_by(score_type, extent, detect_method) %>%
               summarize(score_value=mean(score_value)) %>%
               ungroup() %>%
               mutate(detect_method=gsub('_',' ',detect_method)),
-            shape=21, color='black') +
+            shape=21, color='black', size=3, stroke=1) +
           scale_fill_manual(values=score_colors) +
           ylim(c(0,1)) +
           labs(x='detection method', y='score') +
@@ -1346,8 +1424,9 @@ if (compute_ccgs) {
 
   # define candidate models
   models <- list(
-    regression = lm_model(count ~ day),
+    # regression = lm_model(count ~ day),
     poisson_constant = glm_model(count ~ 1, family = "poisson"),
+    poisson_time = glm_model(count ~ day, family = "poisson"),
     negbin_time = glm_nb_model(count ~ day),
     negbin_time_weekday = glm_nb_model(count ~ day + weekday),
     negbin_time_weekday2 = glm_nb_model(count ~ day * weekday)
@@ -1419,7 +1498,9 @@ if (compute_ccgs) {
               models = models,
               method = asmodee_params$method,
               fixed_k = 7,
-              alpha = alpha_nhs
+              alpha = alpha_nhs,
+              uncertain = FALSE,
+              simulate_pi = TRUE
             )
         )
       } else if (asmodee_conf=='manual_12') {
@@ -1431,7 +1512,9 @@ if (compute_ccgs) {
               models = models,
               method = asmodee_params$method,
               fixed_k = 12,
-              alpha = alpha_nhs
+              alpha = alpha_nhs,
+              uncertain = FALSE,
+              simulate_pi = TRUE
             )
         )
       } else if (asmodee_conf=='opt') {
@@ -1443,7 +1526,9 @@ if (compute_ccgs) {
               models = models,
               max_k = asmodee_params$k_optimal_max,
               method = asmodee_params$method,
-              alpha = alpha_nhs
+              alpha = alpha_nhs,
+              uncertain = FALSE,
+              simulate_pi = TRUE
             )
         )
       }
@@ -1671,3 +1756,4 @@ if (plot_ccgs) {
   }
 
 }
+
