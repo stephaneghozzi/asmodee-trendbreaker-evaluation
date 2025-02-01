@@ -4,7 +4,7 @@ ASMODEE is an outbreak detection algorithm, implemented as `asmodee` in the pack
 
 The method and results are presented in a preprint (first version [here](https://doi.org/10.1101/2020.09.02.20186502), revised version accepted for publication).
 
-With the ASMODEE method `evaluate_aic`, the only randomness in this analysis comes from the simulations. Since random seeds are not set (cf. issue [#1](https://gitlab.com/stephaneghozzi/asmodee-trendbreaker-evaluation/-/issues/1)), each run will produce slightly different results. However all relevant intermediate objects are stored in [data/](data/): if you want to reproduce exactly the results presented in the upcoming publication, you can set `compute_simulations <- FALSE` at the beginning of the script, the simulations will then be loaded from [data/simulations.rds](data/simulations.rds). 
+With the ASMODEE method `evaluate_aic`, the only randomness in this analysis comes from the simulations. Since random seeds are not set, each run will produce slightly different results. However all relevant intermediate objects are stored in [data/](data/): if you want to reproduce exactly the results presented in the upcoming publication, you can set `compute_simulations <- FALSE` at the beginning of the script, the simulations will then be loaded from [data/simulations.rds](data/simulations.rds). 
 
 It takes about 4 hours to run on a laptop for model selection through AIC (`method = evaluate_aic`) and about 2 days with cross-validation (`method = evaluate_resampling`).
 
